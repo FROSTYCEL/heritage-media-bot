@@ -128,4 +128,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    request_id = f"HM-{datetime.now().strftime('%y%m%d-%H%M%S')}
+    date_part = datetime.now().strftime("%y%m%d-%H%M%S")
+    request_id = "HM-" + date_part
+    timestamp = datetime.now().strftime("%d %b %Y, %H:%M")
+    requester = update.effective_user.full_name
+    label = cfg["label"]
+
+    if update.effective_user.username:
+        username = "@" + update.effective_user.username
+    else:
+        username = "(no username)"
+
+    summary_lines = [
+        "NEW " + label + " - " + request_id,
+        "Submitted by: " + requester + " " + username,
+        "Time: " + timestamp,
+        "",
+    ]
+    for field in cfg["fields"]:
+        summary_lines.append(f"{field}: {parsed[field]}")
+
+    summary = "\n".join(summary_lines)
+
+    await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=summary)
+    await update.message.reply_text(
+        f"✅ Submitted! Your request ID is {request_id}.\n"
+        f"The Heritage Media Team has been notified in the group chat."
+    )
+
+    del pending[user_id]
+
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+    )
+
+
+if __name__ == "__main__":
+    main()
