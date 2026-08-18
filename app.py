@@ -1,10 +1,10 @@
 import os
 import re
 import logging
-import threading
+import asyncio
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -18,30 +18,15 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# httpx (used internally by the bot library) logs every API request URL at INFO level,
+# which includes your bot token. Quiet it down so the token never appears in logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # ---------- CONFIG (set these as environment variables on Render, not in this file) ----------
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROUP_CHAT_ID = int(os.environ["GROUP_CHAT_ID"])
+WEBHOOK_URL = os.environ["WEBHOOK_URL"]  # e.g. https://your-app-name.onrender.com
 PORT = int(os.environ.get("PORT", 8080))
-
-
-# ---------- TINY HEALTH-CHECK WEB SERVER ----------
-# Render's free tier expects something to answer on the assigned port.
-# This just replies "OK" to any request so Render considers the service healthy,
-# while the actual bot logic runs separately via polling below.
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Heritage Media Bot is running")
-
-    def log_message(self, format, *args):
-        pass  # keep Render's logs focused on the bot, not health pings
-
-
-def run_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
-    server.serve_forever()
-
 
 # ---------- STATE ----------
 pending = {}
@@ -178,18 +163,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     del pending[user_id]
 
 
-def main():
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
+async def health(request):
+    return web.Response(text="Heritage Media Bot is running")
 
-    app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+async def telegram_webhook(request):
+    application = request.app["bot_application"]
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return web.Response(text="OK")
 
-    app.run_polling()
+
+async def main():
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    await application.initialize()
+    await application.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
+    await application.start()
+
+    web_app = web.Application()
+    web_app["bot_application"] = application
+    # Health check: Render pings this to confirm the service is alive.
+    web_app.router.add_get("/", health)
+    # Real Telegram traffic lands here.
+    web_app.router.add_post(f"/{BOT_TOKEN}", telegram_webhook)
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    logger.info("Bot is up and listening on port %s", PORT)
+
+    # Keep the process alive indefinitely
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
